@@ -1,0 +1,299 @@
+schemaVersion: 2.2.0
+metadata:
+  name: ziax-workspace-base
+  version: 1.0.0
+  description: "Base developer workspace for Ziax GitOps repos (OKD 4.20 SCOS) — provides tools container, volumes, commands, and postStart events. Projects are defined by child devfiles."
+  tags:
+    - GitOps
+    - OKD
+    - ArgoCD
+    - Kustomize
+
+# ── COMPONENTS ────────────────────────────────────────────────────────────────
+components:
+
+  - name: tools
+    container:
+      image: quay.io/ziax/dev-tools:latest
+      memoryLimit: 32Gi
+      memoryRequest: 8Gi
+      cpuLimit: "16"
+      cpuRequest: "4"
+      mountSources: true
+      env:
+        # ── Kubernetes ───────────────────────────────────────────────────────
+        - name: KUBECONFIG
+          value: /home/user/.kube/config
+        - name: KREW_ROOT
+          value: /home/user/.krew
+        # ── Helm ─────────────────────────────────────────────────────────────
+        - name: HELM_CACHE_HOME
+          value: /home/user/.cache/helm
+        - name: HELM_CONFIG_HOME
+          value: /home/user/.config/helm
+        - name: HELM_DATA_HOME
+          value: /home/user/.local/share/helm
+        # ── SDKMAN (JVM toolchain manager, following UDI convention) ─────────
+        - name: SDKMAN_DIR
+          value: /home/user/.sdkman
+        - name: JAVA_HOME
+          value: /home/user/.sdkman/candidates/java/current
+        - name: MAVEN_HOME
+          value: /home/user/.sdkman/candidates/maven/current
+        - name: MAVEN_OPTS
+          value: "-Xmx2G -Xms256m -XX:MaxMetaspaceSize=512m"
+        - name: GRADLE_OPTS
+          value: "-Xmx2G -Xms256m"
+        # ── nvm (Node.js version manager, following UDI convention) ──────────
+        - name: NVM_DIR
+          value: /home/user/.nvm
+        # ── AI tools ─────────────────────────────────────────────────────────
+        - name: ANTHROPIC_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: dev-ai-keys
+              key: ANTHROPIC_API_KEY
+              optional: true
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: dev-ai-keys
+              key: OPENAI_API_KEY
+              optional: true
+        # ── PATH: SDKMAN candidates first, then krew, then system ─────────────
+        - name: PATH
+          value: /home/user/.sdkman/candidates/java/current/bin:/home/user/.sdkman/candidates/maven/current/bin:/home/user/.krew/bin:/home/user/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      volumeMounts:
+        - name: kubeconfig
+          path: /home/user/.kube
+        - name: krew-plugins
+          path: /home/user/.krew
+        - name: sdkman
+          path: /home/user/.sdkman
+        - name: nvm
+          path: /home/user/.nvm
+        - name: m2
+          path: /home/user/.m2
+        - name: gradle
+          path: /home/user/.gradle
+        - name: user-cache
+          path: /home/user/.cache
+      args: ["tail", "-f", "/dev/null"]
+
+  # ── Persistent volumes ────────────────────────────────────────────────────
+  - name: kubeconfig
+    volume:
+      size: 64Mi
+      ephemeral: false
+
+  - name: krew-plugins
+    volume:
+      size: 512Mi
+      ephemeral: false
+
+  - name: sdkman
+    volume:
+      size: 2Gi
+      ephemeral: false
+
+  - name: nvm
+    volume:
+      size: 1Gi
+      ephemeral: false
+
+  - name: m2
+    volume:
+      size: 3Gi
+      ephemeral: false
+
+  - name: gradle
+    volume:
+      size: 3Gi
+      ephemeral: false
+
+  - name: user-cache
+    volume:
+      size: 1Gi
+      ephemeral: false
+
+# ── COMMANDS ──────────────────────────────────────────────────────────────────
+commands:
+
+  # ── postStart initialisation ───────────────────────────────────────────────
+
+  - id: init-git-config
+    exec:
+      label: "Configure git user"
+      component: tools
+      workingDir: /projects
+      commandLine: |
+        [ -L /home/user/.gitconfig ] && [ ! -e /home/user/.gitconfig ] && rm /home/user/.gitconfig || true
+        git config --global user.email "${GIT_AUTHOR_EMAIL:-dev@ziax.com}"
+        git config --global user.name  "${GIT_AUTHOR_NAME:-Dev Workspace}"
+        git config --global core.editor vim
+        git config --global pull.rebase true
+
+  - id: init-sdkman
+    exec:
+      label: "Initialise SDKMAN volume from image backup"
+      component: tools
+      workingDir: /projects
+      commandLine: |
+        if [ ! -f "${SDKMAN_DIR}/bin/sdkman-init.sh" ]; then
+          echo "Populating SDKMAN volume from image backup..."
+          cp -a /opt/sdkman/. "${SDKMAN_DIR}/"
+        fi
+
+  - id: init-nvm
+    exec:
+      label: "Initialise nvm volume from image backup"
+      component: tools
+      workingDir: /projects
+      commandLine: |
+        if [ ! -f "${NVM_DIR}/nvm.sh" ]; then
+          echo "Populating nvm volume from image backup..."
+          cp -a /opt/nvm/. "${NVM_DIR}/"
+        fi
+
+  - id: init-krew
+    exec:
+      label: "Install/update krew plugins"
+      component: tools
+      workingDir: /projects
+      commandLine: |
+        export PATH="${KREW_ROOT}/bin:${PATH}"
+        if ! kubectl krew version &>/dev/null 2>&1; then
+          OS="$(uname | tr '[:upper:]' '[:lower:]')"
+          ARCH="$(uname -m | sed -e 's/x86_64/amd64/' -e 's/arm.*$/arm/')"
+          KREW_PKG="krew-${OS}_${ARCH}"
+          KREW_TMP="$(mktemp -d)"
+          curl -fsSL "https://github.com/kubernetes-sigs/krew/releases/latest/download/${KREW_PKG}.tar.gz" \
+            | tar -C "${KREW_TMP}" -zx \
+            && "${KREW_TMP}/${KREW_PKG}" install krew \
+            || echo "krew install failed, will retry on next start"
+          rm -rf "${KREW_TMP}"
+        fi
+        kubectl krew update || true
+        kubectl krew install ctx ns neat || true
+
+  # ── Kustomize / GitOps ─────────────────────────────────────────────────────
+
+  - id: kustomize-build
+    exec:
+      label: "kustomize build (set KUSTOMIZE_DIR)"
+      component: tools
+      workingDir: /projects/cluster-configuration
+      commandLine: |
+        KUSTOMIZE_DIR="${KUSTOMIZE_DIR:-components}"
+        echo "Building: $KUSTOMIZE_DIR"
+        kustomize build "$KUSTOMIZE_DIR" --enable-helm --load-restrictor LoadRestrictionsNone
+
+  - id: kustomize-build-all
+    exec:
+      label: "Test all kustomize overlays"
+      component: tools
+      workingDir: /projects/cluster-configuration
+      commandLine: |
+        set -e
+        failed=0
+        while IFS= read -r dir; do
+          echo "Checking: $dir"
+          kustomize build "$dir" --enable-helm --load-restrictor LoadRestrictionsNone >/dev/null \
+            || { echo "FAILED: $dir"; failed=1; }
+        done < <(find components -mindepth 4 -maxdepth 4 \
+          -type f \( -name "kustomization.yaml" -o -name "kustomization.yml" \) \
+          -printf '%h\n')
+        [ "$failed" -eq 0 ] && echo "All overlays OK" || exit 1
+
+  # ── ArgoCD ─────────────────────────────────────────────────────────────────
+
+  - id: argocd-login
+    exec:
+      label: "argocd login (uses ARGOCD_SERVER env)"
+      component: tools
+      workingDir: /projects/cluster-configuration
+      commandLine: |
+        argocd login "${ARGOCD_SERVER}" --sso --insecure --grpc-web
+
+  - id: argocd-diff
+    exec:
+      label: "argocd app diff (set APP_NAME)"
+      component: tools
+      workingDir: /projects/cluster-configuration
+      commandLine: |
+        argocd app diff "${APP_NAME}" --local-repo-root . --local .
+
+  - id: argocd-sync
+    exec:
+      label: "argocd app sync (set APP_NAME)"
+      component: tools
+      workingDir: /projects/cluster-configuration
+      commandLine: |
+        argocd app sync "${APP_NAME}" --local-repo-root . --local .
+
+  # ── OpenBao ────────────────────────────────────────────────────────────────
+
+  - id: bao-connect
+    exec:
+      label: "Connect OpenBao auth to a cluster (set CLUSTER_NAME, optionally ENVIRONMENT)"
+      component: tools
+      workingDir: /projects/cluster-configuration
+      commandLine: |
+        components/external-secrets/scripts/connect-openbao.sh
+
+  # ── Config management ──────────────────────────────────────────────────────
+
+  - id: butane-render
+    exec:
+      label: "Render .bu files to MachineConfig YAML (set BU_DIR)"
+      component: tools
+      workingDir: /projects/cluster-configuration
+      commandLine: scripts/butane.sh "${BU_DIR:-base/cluster/machines/configs}"
+
+  - id: update-oauth-secret
+    exec:
+      label: "Rotate Azure OAuth client secret"
+      component: tools
+      workingDir: /projects/cluster-configuration
+      commandLine: scripts/update-oauth-secret.sh
+
+  # ── Observability ──────────────────────────────────────────────────────────
+
+  - id: k9s
+    exec:
+      label: "Launch k9s"
+      component: tools
+      workingDir: /projects/cluster-configuration
+      commandLine: k9s
+
+  - id: stern-watch
+    exec:
+      label: "stern log tail (set STERN_SELECTOR and optionally STERN_NS)"
+      component: tools
+      workingDir: /projects/cluster-configuration
+      commandLine: |
+        stern "${STERN_SELECTOR:-.}" --namespace "${STERN_NS:-default}"
+
+  # ── AI tools ───────────────────────────────────────────────────────────────
+
+  - id: claude-code
+    exec:
+      label: "Launch Claude Code"
+      component: tools
+      workingDir: /projects/cluster-configuration
+      commandLine: claude
+
+  - id: aider
+    exec:
+      label: "Launch aider AI pair-programmer"
+      component: tools
+      workingDir: /projects/cluster-configuration
+      commandLine: aider
+
+# ── EVENTS ────────────────────────────────────────────────────────────────────
+events:
+  postStart:
+    - init-git-config
+    - init-sdkman
+    - init-nvm
+    - init-krew
