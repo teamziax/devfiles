@@ -47,19 +47,6 @@ components:
         # ── nvm (Node.js version manager, following UDI convention) ──────────
         - name: NVM_DIR
           value: /home/user/.nvm
-        # ── AI tools ─────────────────────────────────────────────────────────
-        - name: ANTHROPIC_API_KEY
-          valueFrom:
-            secretKeyRef:
-              name: dev-ai-keys
-              key: ANTHROPIC_API_KEY
-              optional: true
-        - name: OPENAI_API_KEY
-          valueFrom:
-            secretKeyRef:
-              name: dev-ai-keys
-              key: OPENAI_API_KEY
-              optional: true
         # ── PATH: SDKMAN candidates first, then krew, then system ─────────────
         - name: PATH
           value: /home/user/.sdkman/candidates/java/current/bin:/home/user/.sdkman/candidates/maven/current/bin:/home/user/.krew/bin:/home/user/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
