@@ -27,7 +27,6 @@ components:
             add:
               - SETUID
               - SETGID
-              - AUDIT_WRITE
     container:
       image: quay.io/ziax/dev-tools:latest
       memoryLimit: 32Gi
