@@ -17,12 +17,17 @@ components:
       pod-overrides:
         metadata:
           annotations:
-            io.kubernetes.cri-o.Devices: "/dev/fuse,/dev/net/tun" # (1)
+            io.kubernetes.cri-o.Devices: "/dev/fuse,/dev/net/tun"
         spec:
           hostUsers: false
       container-overrides:
         securityContext:
           procMount: Unmasked
+          capabilities:
+            add:
+              - SETUID
+              - SETGID
+              - AUDIT_WRITE
     container:
       image: quay.io/ziax/dev-tools:latest
       memoryLimit: 32Gi
@@ -127,6 +132,21 @@ commands:
       component: tools
       workingDir: /projects
       commandLine: |
+        cat > /var/tmp/audit-stub.c << 'CEOF'
+        #include <errno.h>
+        int audit_open(void) { errno = EAFNOSUPPORT; return -1; }
+        int audit_close(int fd) { return 0; }
+        int audit_log_user_message(int fd, int type, const char *message, const char *hostname, const char *addr, const char *tty, int result) { return 0; }
+        int audit_log_user_comm_message(int fd, int type, const char *message, const char *comm, const char *hostname, const char *addr, const char *tty, int result) { return 0; }
+        int audit_log_acct_message(int fd, int type, const char *pgname, const char *op, const char *name, unsigned int id, const char *host, const char *addr, const char *tty, int result) { return 0; }
+        CEOF
+        gcc -shared -fPIC -o /var/tmp/libaudit-stub.so /var/tmp/audit-stub.c 2>/dev/null || true
+        until [ -f /tmp/sshd.pid ]; do sleep 1; done
+        kill "$(cat /tmp/sshd.pid)" 2>/dev/null || true
+        sleep 1
+        SSHD_LIBDIR=/sshd/ubi9
+        LD_PRELOAD=/var/tmp/libaudit-stub.so:$SSHD_LIBDIR/libeconf.so.0:$SSHD_LIBDIR/libpam.so.0:$SSHD_LIBDIR/libcrypt.so.2 \
+          $SSHD_LIBDIR/sshd -D -f /var/tmp/ssh/sshd_config -E /tmp/sshd.log &
         [ -L /home/user/.gitconfig ] && [ ! -e /home/user/.gitconfig ] && rm /home/user/.gitconfig || true
         git config --global user.email "${GIT_AUTHOR_EMAIL:-dev@ziax.com}"
         git config --global user.name  "${GIT_AUTHOR_NAME:-Dev Workspace}"
